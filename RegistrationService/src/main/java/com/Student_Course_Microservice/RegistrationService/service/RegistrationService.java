@@ -2,8 +2,11 @@ package com.Student_Course_Microservice.RegistrationService.service;
 
 import com.Student_Course_Microservice.RegistrationService.model.Registration;
 import com.Student_Course_Microservice.RegistrationService.repo.RegistrationRepository;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
+import org.springframework.kafka.annotation.KafkaListener;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -19,56 +22,69 @@ public class RegistrationService {
     @Autowired
     private RegistrationRepository registrationRepository;
 
+    @Autowired
+    private KafkaTemplate<String, String> kafkaTemplate;
+
+    @Autowired
+    private ObjectMapper objectMapper;
+
+    // In-memory cache for courses
+    private Map<Integer, Map<String, Object>> courseCache = new HashMap<>();
+
+    // Consume course events
+    @KafkaListener(topics = "course-topic", groupId = "registration-group")
+    public void consumeCourse(String message) {
+        try {
+            // Use Jackson ObjectMapper to parse JSON
+
+            Map<String, Object> courseMap = objectMapper.readValue(message, Map.class);
+
+            Number idNumber = (Number) courseMap.get("id");
+            Integer courseId = idNumber.intValue();
+            courseCache.put(courseId, courseMap);
+
+        } catch (Exception ex) {
+            System.out.println("Failed to parse course message: " + message);
+            ex.printStackTrace();
+        }
+    }
+
+    // Main registration method
     public String registerStudent(Registration request) {
 
-        //steps
-        //1-get student info
-        //2-get course info
-        //3-send notification
-
-        //get student info
+        // 1. Get student info from StudentService
         Map studentMap;
-        try {
+        try {                        //this is RestTemplate call....
             String studentGetUrl = "http://localhost:8083/students/" + request.getStudentId();
             ResponseEntity<Map> studentResponse = restTemplate.getForEntity(studentGetUrl, Map.class);
             studentMap = studentResponse.getBody();
         } catch (Exception ex) {
-            return "student service is unavailable now...!!!";
+            return "Student service is unavailable now!";
         }
 
-
-        //get course info
-        Map courseMap;
-        try {
-            String courseGetUrl = "http://localhost:8082/courses/" + request.getCourseId();
-            ResponseEntity<Map> courseResponse = restTemplate.getForEntity(courseGetUrl, Map.class);
-            courseMap = courseResponse.getBody();
-        } catch (Exception ex) {
-            return "Course Service is unavailble now";
+        // 2. Get course info from in-memory cache
+        Map courseMap = courseCache.get(request.getCourseId());
+        if (courseMap == null) {
+            return "Course information not available. Try again later!";
         }
 
-        //Save registration details to db
-        Registration registration=new Registration();
+        // 3. Save registration to DB
+        Registration registration = new Registration();
         registration.setStudentId(request.getStudentId());
         registration.setCourseId(request.getCourseId());
         registrationRepository.save(registration);
 
+        // 4. Produce registration event to Kafka
+        String registrationMessage = "{"
+                + "\"studentId\": " + request.getStudentId() + ","
+                + "\"studentEmail\": \"" + studentMap.get("email") + "\","
+                + "\"courseId\": " + request.getCourseId() + ","
+                + "\"courseName\": \"" + courseMap.get("name") + "\""
+                + "}";
+        kafkaTemplate.send("registration-topic", registrationMessage);
 
-        // 3. Send notification
-        try {
-            String notificationUrl = "http://localhost:8081/notifications";
-            Map<String, String> notification = new HashMap<>();
-            notification.put("email", (String) studentMap.get("email"));
-            notification.put("message", "You have successfully registered for the course: " + courseMap.get("name"));
-            ResponseEntity<String> notificationResponse = restTemplate.postForEntity(notificationUrl, notification, String.class);
-            return "Registration successful! "
-                    +" student "+studentMap.get("name")
-                    +" is register to "+courseMap.get("name")+" "
-                    + notificationResponse.getBody();
-
-        }catch (Exception ex){
-            return "Registration completed but failed to send message";
-        }
+        return "Registration successful! Student " + studentMap.get("name")
+                + " is registered to " + courseMap.get("name")
+                + ". Notification sent via Kafka.";
     }
-
 }

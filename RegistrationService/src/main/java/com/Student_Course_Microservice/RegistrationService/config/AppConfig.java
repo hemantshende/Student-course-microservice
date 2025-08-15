@@ -11,3 +11,8 @@ public class AppConfig {
         return new RestTemplate();
     }
 }
+
+
+//this is for RestTemplate http--
+
+//this is not needed in kafka..
